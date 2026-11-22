@@ -1,0 +1,52 @@
+name: Coleta de preços
+
+on:
+  schedule:
+    - cron: "7 */4 * * *"   # a cada 4 horas (UTC; minuto 7 foge do pico do GitHub)
+  workflow_dispatch:         # botão "Run workflow" para rodar na hora
+
+permissions:
+  contents: write            # para commitar os dados de volta
+
+concurrency:
+  group: coleta
+  cancel-in-progress: false
+
+jobs:
+  coleta:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      TZ: America/Sao_Paulo
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Período da Black Friday
+        id: periodo
+        run: |
+          if [ "$(date +%Y%m%d)" -gt 20261128 ]; then
+            echo "Período encerrado — desative este workflow em Actions → Coleta de preços → ⋯ → Disable workflow." >> "$GITHUB_STEP_SUMMARY"
+            echo "ativo=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ativo=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-python@v5
+        if: steps.periodo.outputs.ativo == 'true'
+        with:
+          python-version: "3.12"
+
+      - name: Coletar preços
+        if: steps.periodo.outputs.ativo == 'true'
+        run: python tracker.py
+
+      - name: Salvar resultados no repositório
+        if: steps.periodo.outputs.ativo == 'true'
+        run: |
+          git config user.name "coleta-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add dados relatorio.html
+          git diff --cached --quiet && { echo "sem mudanças"; exit 0; }
+          git commit -m "Coleta $(date '+%Y-%m-%d %H:%M')"
+          for i in 1 2 3; do git pull --rebase -X theirs && git push && exit 0; sleep 5; done
+          exit 1
