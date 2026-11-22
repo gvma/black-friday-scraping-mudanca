@@ -37,6 +37,7 @@ REPORT = BASE / "relatorio.html"
 ZOOM = "https://www.zoom.com.br"
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/131.0 Safari/537.36")
+SITE = "https://gvma.github.io/black-friday-scraping-mudanca/"
 DELAY = 2.0  # segundos entre requisições — educado com o site
 
 # Voltagem da casa: 220 V. Descarta anúncios que dizem só 110/127 V.
@@ -440,7 +441,7 @@ def main():
             return
     rows = latest(con)
     export_csv(con, rows)
-    html_report(con, rows)
+    html_report(con, rows, nav=f'<nav><a href="{SITE}">Site com todas as coletas ↗</a></nav>')
     print(f"\n{len(rows)} produtos · CSVs em {DATA} · relatório em {REPORT}")
     if a.site:
         build_site(con, a.site)
