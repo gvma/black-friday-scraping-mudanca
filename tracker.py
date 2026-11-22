@@ -166,13 +166,15 @@ def collect(con, items, dry_run=False):
 
 
 # ----------------------------------------------------------------- análise
-def latest(con):
-    """Última coleta válida de cada item + métricas de custo-benefício."""
+def latest(con, upto=None):
+    """Última coleta válida de cada item (até `upto`, se dado) + métricas de custo-benefício."""
+    upto = upto or "9999"
     con.row_factory = sqlite3.Row
     rows = [dict(r) for r in con.execute("""
         SELECT c.* FROM coletas c
-        JOIN (SELECT item_id, MAX(coleta_em) m FROM coletas WHERE erro IS NULL GROUP BY item_id) x
-          ON x.item_id = c.item_id AND x.m = c.coleta_em""")]
+        JOIN (SELECT item_id, MAX(coleta_em) m FROM coletas WHERE erro IS NULL AND coleta_em <= ?
+              GROUP BY item_id) x
+          ON x.item_id = c.item_id AND x.m = c.coleta_em""", (upto,))]
     con.row_factory = None
     meta = {i["id"]: i for i in ITEMS}
     rows = [r for r in rows if r["item_id"] in meta]
@@ -181,7 +183,8 @@ def latest(con):
         r["qualidade"] = it["quality"]
         r["observacao"] = it["note"]
         hist = [p for (p,) in con.execute(
-            "SELECT preco FROM historico WHERE produto_id=? ORDER BY data", (r["produto_id"],))]
+            "SELECT preco FROM historico WHERE produto_id=? AND data <= ? ORDER BY data",
+            (r["produto_id"], upto[:10]))]
         r["min_historico"] = round(min(hist), 2) if hist else None
         r["dias_historico"] = len(hist)
         ref = r["mediana_40d"]
@@ -238,8 +241,9 @@ def brl(v):
     return "—" if v is None else "R$ " + f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
-def sparkline(con, pid, w=140, h=34):
-    pts = con.execute("SELECT data, preco FROM historico WHERE produto_id=? ORDER BY data", (pid,)).fetchall()
+def sparkline(con, pid, upto="9999", w=140, h=34):
+    pts = con.execute("SELECT data, preco FROM historico WHERE produto_id=? AND data <= ? ORDER BY data",
+                      (pid, upto[:10])).fetchall()
     if len(pts) < 2:
         return ""
     ys = [p for _, p in pts]
@@ -254,11 +258,48 @@ def sparkline(con, pid, w=140, h=34):
             f'<circle cx="{lx}" cy="{ly}" r="2.6" fill="var(--accent)"/></svg>')
 
 
-def html_report(con, rows):
-    esc = lambda s: (str(s) if s is not None else "").replace("&", "&amp;").replace("<", "&lt;")
+CSS = """:root{--bg:#f7f6f3;--card:#fff;--fg:#1d1d1b;--muted:#6b6a66;--border:#e4e2dc;--accent:#2f6fde;--line:#8a8983;
+--good-bg:#e3f3e6;--good:#1f6b33;--bad-bg:#fbe7e4;--bad:#9b2c1e;--top:#eef4ff}
+@media (prefers-color-scheme:dark){:root{--bg:#151514;--card:#1f1f1d;--fg:#ecebe7;--muted:#9c9b96;--border:#34332f;
+--accent:#6d9bff;--line:#8f8e89;--good-bg:#1c3324;--good:#8fd6a2;--bad-bg:#3a201c;--bad:#f0a196;--top:#1d2638}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 -apple-system,system-ui,sans-serif}
+main{max-width:1200px;margin:0 auto;padding:24px 16px 64px}h1{margin:0 0 4px;font-size:26px}
+h2{font-size:18px;margin:0 0 6px}h2 .muted{font-weight:400;font-size:14px;margin-left:8px}
+section,.basket{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px;margin-top:18px}
+.muted{color:var(--muted);font-size:12.5px}.small{font-size:12.5px;white-space:nowrap}
+.scroll{overflow-x:auto}table{border-collapse:collapse;width:100%;min-width:1050px}td:first-child{min-width:300px}
+th{text-align:left;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);padding:6px 8px;border-bottom:1px solid var(--border)}
+td{padding:10px 8px;border-bottom:1px solid var(--border);vertical-align:top}tr.top{background:var(--top)}
+td.num{white-space:nowrap}a{color:var(--fg);text-decoration-color:var(--border)}a:hover{color:var(--accent)}
+.cb{height:7px;background:var(--border);border-radius:4px;width:110px;margin:6px 0 3px}.cb span{display:block;height:100%;background:var(--accent);border-radius:4px}
+.badge{display:inline-block;padding:2px 8px;border-radius:99px;font-size:12px;background:var(--border)}
+.badge.good{background:var(--good-bg);color:var(--good)}.badge.bad{background:var(--bad-bg);color:var(--bad)}
+.tips{margin:4px 0 10px;padding-left:18px;color:var(--muted);font-size:13px}
+.basket ul{list-style:none;padding:0;margin:8px 0}.basket li{display:flex;justify-content:space-between;gap:12px;padding:5px 0;border-bottom:1px dashed var(--border)}
+.basket .sum{font-size:18px;text-align:right}.warn{color:var(--bad);font-size:13px}
+nav{margin:0 0 14px;font-size:14px;display:flex;gap:16px;flex-wrap:wrap}
+nav a{color:var(--accent);text-decoration:none}
+.runs td,.runs th{white-space:nowrap}.up{color:var(--bad)}.down{color:var(--good)}
+"""
+
+
+def esc(s):
+    return (str(s) if s is not None else "").replace("&", "&amp;").replace("<", "&lt;").replace('"', "&quot;")
+
+
+def basket_of(rows):
+    """Cesta sugerida: melhor custo-benefício de cada categoria (rows já vem ordenado)."""
+    best = {}
+    for r in rows:
+        best.setdefault(r["categoria"], r)
+    return list(best.values())
+
+
+def html_report(con, rows, out=REPORT, upto=None, nav=""):
+    upto = upto or con.execute("SELECT MAX(coleta_em) FROM coletas").fetchone()[0] or "9999"
     last = max((r["coleta_em"] for r in rows), default="—")
-    n_coletas = con.execute("SELECT COUNT(DISTINCT coleta_em) FROM coletas").fetchone()[0]
-    errors = con.execute("SELECT item_id, erro FROM coletas WHERE coleta_em=(SELECT MAX(coleta_em) FROM coletas) AND erro IS NOT NULL").fetchall()
+    n_coletas = con.execute("SELECT COUNT(DISTINCT coleta_em) FROM coletas WHERE coleta_em <= ?", (upto,)).fetchone()[0]
+    errors = con.execute("SELECT item_id, erro FROM coletas WHERE coleta_em=? AND erro IS NOT NULL", (upto,)).fetchall()
 
     # cesta sugerida: melhor custo-benefício de cada categoria
     basket, sections = [], []
@@ -284,7 +325,7 @@ def html_report(con, rows):
                   <span class="muted">{r['custo_beneficio']} · qualidade {r['qualidade']}</span></td>
               <td><span class="badge {badge}">{esc(r['veredito'])}</span><div class="muted">{delta}</div></td>
               <td class="num">{brl(r['min_40d'])}<div class="muted">mediana {brl(r['mediana_40d'])}</div></td>
-              <td>{sparkline(con, r['produto_id'])}</td>
+              <td>{sparkline(con, r['produto_id'], upto)}</td>
               <td class="small">{ofs}</td></tr>""")
         tips = "".join(f"<li>{esc(t)}</li>" for t in cfg["tips"])
         qty = f" · precisa de {cfg['quantity']}" if cfg["quantity"] > 1 else ""
@@ -303,29 +344,9 @@ def html_report(con, rows):
 
     html = f"""<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Preços da Mudança</title>
-<style>
-:root{{--bg:#f7f6f3;--card:#fff;--fg:#1d1d1b;--muted:#6b6a66;--border:#e4e2dc;--accent:#2f6fde;--line:#8a8983;
---good-bg:#e3f3e6;--good:#1f6b33;--bad-bg:#fbe7e4;--bad:#9b2c1e;--top:#eef4ff}}
-@media (prefers-color-scheme:dark){{:root{{--bg:#151514;--card:#1f1f1d;--fg:#ecebe7;--muted:#9c9b96;--border:#34332f;
---accent:#6d9bff;--line:#8f8e89;--good-bg:#1c3324;--good:#8fd6a2;--bad-bg:#3a201c;--bad:#f0a196;--top:#1d2638}}}}
-*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 -apple-system,system-ui,sans-serif}}
-main{{max-width:1200px;margin:0 auto;padding:24px 16px 64px}}h1{{margin:0 0 4px;font-size:26px}}
-h2{{font-size:18px;margin:0 0 6px}}h2 .muted{{font-weight:400;font-size:14px;margin-left:8px}}
-section,.basket{{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px;margin-top:18px}}
-.muted{{color:var(--muted);font-size:12.5px}}.small{{font-size:12.5px;white-space:nowrap}}
-.scroll{{overflow-x:auto}}table{{border-collapse:collapse;width:100%;min-width:1050px}}td:first-child{{min-width:300px}}
-th{{text-align:left;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);padding:6px 8px;border-bottom:1px solid var(--border)}}
-td{{padding:10px 8px;border-bottom:1px solid var(--border);vertical-align:top}}tr.top{{background:var(--top)}}
-td.num{{white-space:nowrap}}a{{color:var(--fg);text-decoration-color:var(--border)}}a:hover{{color:var(--accent)}}
-.cb{{height:7px;background:var(--border);border-radius:4px;width:110px;margin:6px 0 3px}}.cb span{{display:block;height:100%;background:var(--accent);border-radius:4px}}
-.badge{{display:inline-block;padding:2px 8px;border-radius:99px;font-size:12px;background:var(--border)}}
-.badge.good{{background:var(--good-bg);color:var(--good)}}.badge.bad{{background:var(--bad-bg);color:var(--bad)}}
-.tips{{margin:4px 0 10px;padding-left:18px;color:var(--muted);font-size:13px}}
-.basket ul{{list-style:none;padding:0;margin:8px 0}}.basket li{{display:flex;justify-content:space-between;gap:12px;padding:5px 0;border-bottom:1px dashed var(--border)}}
-.basket .sum{{font-size:18px;text-align:right}}.warn{{color:var(--bad);font-size:13px}}
-</style></head><body><main>
-<h1>Preços da mudança — Black Friday</h1>
-<div class="muted">Última coleta: {esc(last)} · {n_coletas} coleta(s) no banco · fonte: Zoom (agrega Amazon, Magalu, Casas Bahia, Americanas, Fast Shop e outras)</div>
+<style>{CSS}</style></head><body><main>
+{nav}<h1>Preços da mudança — Black Friday</h1>
+<div class="muted">Coleta: {esc(last)} · {n_coletas} coleta(s) no banco · fonte: Zoom (agrega Amazon, Magalu, Casas Bahia, Americanas, Fast Shop e outras)</div>
 {err_html}
 <div class="basket"><h2>Cesta sugerida (melhor custo-benefício de cada categoria)</h2><ul>{basket_li}</ul>
 <div class="sum">Total: <b>{brl(total)}</b></div>
@@ -333,7 +354,74 @@ td.num{{white-space:nowrap}}a{{color:var(--fg);text-decoration-color:var(--borde
 "Momento" compara o preço de agora com os últimos 40 dias — é o que denuncia a "metade do dobro".</div></div>
 {''.join(sections)}
 </main></body></html>"""
-    REPORT.write_text(html, encoding="utf-8")
+    Path(out).write_text(html, encoding="utf-8")
+
+
+def page(title, body):
+    return (f'<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">'
+            f'<meta name="viewport" content="width=device-width,initial-scale=1"><title>{esc(title)}</title>'
+            f'<style>{CSS}</style></head><body><main>{body}</main></body></html>')
+
+
+def build_site(con, outdir):
+    """Site estático para o GitHub Pages: última coleta, histórico e um relatório por coleta."""
+    outdir = Path(outdir)
+    (outdir / "coletas").mkdir(parents=True, exist_ok=True)
+    (outdir / "dados").mkdir(exist_ok=True)
+    runs = [r for (r,) in con.execute("SELECT DISTINCT coleta_em FROM coletas ORDER BY 1")]
+    slug = lambda run: run.replace(" ", "_").replace(":", "")
+    summary = []
+    for run in runs:
+        rows = latest(con, run)
+        if not rows:
+            continue
+        nav = '<nav><a href="../index.html">← Última coleta</a><a href="../historico.html">Todas as coletas</a></nav>'
+        html_report(con, rows, outdir / "coletas" / f"{slug(run)}.html", run, nav)
+        n, err = con.execute("SELECT SUM(erro IS NULL), SUM(erro IS NOT NULL) FROM coletas WHERE coleta_em=?",
+                             (run,)).fetchone()
+        good = sum(r["veredito"] in ("menor preço em 40 dias", "abaixo do normal") for r in rows)
+        cats = {r["categoria"]: r["total"] for r in basket_of(rows)}
+        summary.append((run, n, err, sum(cats.values()), good, cats))
+    if summary:
+        nav = '<nav><a href="historico.html">Todas as coletas</a><a href="dados/resumo_atual.csv">Baixar CSV</a></nav>'
+        html_report(con, latest(con), outdir / "index.html", runs[-1], nav)
+    # histórico de coletas
+    trs, prev = [], None
+    for run, n, err, total, good, cats in summary:
+        d = ""
+        if prev is not None:  # compara só categorias presentes nas duas coletas
+            common = cats.keys() & prev.keys()
+            a, b = sum(cats[c] for c in common), sum(prev[c] for c in common)
+            d = "=" if abs(a - b) <= 0.5 else f'<span class="{"up" if a > b else "down"}">{(a / b - 1) * 100:+.1f}%</span>'
+            new = sorted(cats.keys() - prev.keys())
+            if new:
+                d += f' <span class="muted">(entrou: {", ".join(new)})</span>'
+        trs.append(f'<tr><td><a href="coletas/{slug(run)}.html">{esc(run)}</a></td><td>{n}</td>'
+                   f'<td>{err or ""}</td><td><b>{brl(total)}</b></td><td>{d}</td><td>{good}</td></tr>')
+        prev = cats
+    chart = ""
+    if len(summary) > 1:
+        ys = [x[3] for x in summary]
+        lo, hi = min(ys), max(ys)
+        span, w, h = (hi - lo) or 1, 600, 120
+        pts = " ".join(f"{i * w / (len(ys) - 1):.1f},{h - 8 - (y - lo) / span * (h - 16):.1f}" for i, y in enumerate(ys))
+        chart = (f'<svg viewBox="0 0 {w} {h}" width="100%" height="{h}" preserveAspectRatio="none" role="img" '
+                 f'aria-label="Total da cesta de {brl(ys[0])} a {brl(ys[-1])}">'
+                 f'<polyline points="{pts}" fill="none" stroke="var(--accent)" stroke-width="2" '
+                 f'vector-effect="non-scaling-stroke"/></svg>'
+                 f'<div class="muted">mín {brl(lo)} · máx {brl(hi)}</div>')
+    body = (f'<nav><a href="index.html">← Última coleta</a><a href="dados/coletas.csv">CSV de todas as coletas</a></nav>'
+            f'<h1>Todas as coletas</h1><div class="muted">{len(summary)} coleta(s). A cesta é o melhor '
+            f'custo-benefício de cada categoria naquele momento.</div>'
+            f'<section><h2>Total da cesta ao longo do tempo</h2>{chart or "<p class=muted>Precisa de 2+ coletas.</p>"}</section>'
+            f'<section><div class="scroll"><table class="runs" style="min-width:0"><thead><tr><th>Coleta</th><th>Produtos</th>'
+            f'<th>Erros</th><th>Cesta sugerida</th><th>vs anterior</th><th>Em bom momento</th></tr></thead>'
+            f'<tbody>{"".join(reversed(trs))}</tbody></table></div></section>')
+    (outdir / "historico.html").write_text(page("Todas as coletas", body), encoding="utf-8")
+    for f in DATA.glob("*.csv"):
+        (outdir / "dados" / f.name).write_bytes(f.read_bytes())
+    (outdir / ".nojekyll").write_text("")
+    print(f"site em {outdir} ({len(summary)} coletas)")
 
 
 def main():
@@ -342,6 +430,7 @@ def main():
     ap.add_argument("--only", choices=list(CATEGORIES))
     ap.add_argument("--report", action="store_true", help="não coleta; só regenera CSVs/relatório")
     ap.add_argument("--notify", action="store_true", help="mostra notificação do macOS com os destaques")
+    ap.add_argument("--site", metavar="PASTA", help="gera o site estático (GitHub Pages) nesta pasta")
     a = ap.parse_args()
     con = db()
     if not a.report:
@@ -353,6 +442,8 @@ def main():
     export_csv(con, rows)
     html_report(con, rows)
     print(f"\n{len(rows)} produtos · CSVs em {DATA} · relatório em {REPORT}")
+    if a.site:
+        build_site(con, a.site)
     if a.notify:
         notify(con, rows)
     if os.environ.get("GITHUB_STEP_SUMMARY"):

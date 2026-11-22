@@ -23,6 +23,10 @@ Depois de 28/11/2026 ele não coleta mais (desative em Actions → Coleta de pre
 - **Ver o resumo da última coleta:** aba *Actions* → última execução → *Summary*.
 - **Rodar agora:** aba *Actions* → *Coleta de preços* → *Run workflow*.
 - **Ver localmente:** `git pull` e `open relatorio.html`.
+- **Site (GitHub Pages):** cada coleta também publica `https://gvma.github.io/black-friday-scraping-mudanca/`,
+  com o relatório atual, a página *Todas as coletas* (total da cesta ao longo do tempo) e um relatório
+  por coleta. Requer repositório público e *Settings → Pages → Source: GitHub Actions*.
+  Para gerar o site localmente: `python3 tracker.py --report --site _site`.
 
 Só considera aparelhos 220 V (descarta anúncios marcados 110/127 V).
 
