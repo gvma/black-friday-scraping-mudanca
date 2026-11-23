@@ -58,7 +58,7 @@ CATEGORIES = {
     "tv": {
         "label": "Smart TV 60–70\" (na prática, 65\")",
         "quantity": 1,
-        "require": r"(?<!\d)(60|65|70)(?!\d)",
+        "require": r"(?<![A-Za-z\d])(60|65|70)(?!\d)",  # 65", 65C7L — mas não QNED70A
         "exclude": r"Suporte|Controle Remoto|Cabo|Capa|Pel[íi]cula|Rack|Painel|Conversor|Antena",
         "tips": [
             "60\" praticamente sumiu do mercado e 70\" tem poucas opções; 65\" é o tamanho com mais escolha.",
@@ -179,6 +179,10 @@ ITEMS = [
      "query": "tv tcl 65c7l",
      "match": r"C7L",
      "note": "Pedido de vocês. QD-Mini LED topo da TCL: brilho alto, 144 Hz, som Bang & Olufsen."},
+    {"id": "tv-tcl-65c7k", "cat": "tv", "quality": 4.5,
+     "query": "tcl c7k 65",
+     "match": r"C7K",
+     "note": "Pedido de vocês. QD-Mini LED da geração anterior à C7L, imagem parecida — vale a pena se cair bem abaixo da C7L."},
     {"id": "tv-tcl-65c6k", "cat": "tv", "quality": 4.0,
      "query": "tv tcl 65c6k",
      "match": r"C6K",
